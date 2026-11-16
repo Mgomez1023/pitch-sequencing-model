@@ -3,3 +3,5 @@ data/
 __pycache__/
 .ipynb_checkpoints/
 main copy.ipynb
+.pytest_tmp/
+.pytest_cache/

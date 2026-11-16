@@ -27,3 +27,7 @@ OFFSPEED = ["SL", "ST", "CU", "KC", "CH", "FS"]
 
 TRAIN_CUTOFF = "2026-09-01"
 RANDOM_STATE = 42
+
+MODEL_DIR = PROJECT_ROOT / "models"
+MODEL_PATH = MODEL_DIR / "whiff_model_a.joblib"
+METRICS_PATH = MODEL_DIR / "metrics.json"

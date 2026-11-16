@@ -10,3 +10,7 @@ dependencies = ["pandas", "numpy", "scikit-learn", "pyarrow"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--basetemp=.pytest_tmp"
