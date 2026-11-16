@@ -1,5 +1,11 @@
 import pandas as pd
-from pitchmodel.config import WHIFF_DESCRIPTIONS
+from pitchmodel.config import (
+    WHIFF_DESCRIPTIONS, 
+    SWING_DESCRIPTIONS, 
+    FEATURES,
+    TRAIN_CUTOFF,
+    CATEGORICAL_FEATURES
+)
 
 def add_whiff_target(df: pd.DataFrame) -> pd.DataFrame:
     """ Add a 0/1 'whiff' column (Savant Definiton) """
@@ -26,3 +32,24 @@ def add_sequence_features(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     return df
+
+def get_swings(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep rows where the batter swung, with complete baseline features."""
+    swings = df[df["description"].isin(SWING_DESCRIPTIONS)]
+    swings = swings.dropna(subset=FEATURES+["whiff"]).copy()
+
+    for feature in CATEGORICAL_FEATURES + ["prev_pitch_type"]:
+        if feature in swings.columns:
+            swings[feature] = swings[feature].astype("category")
+
+
+    swings["game_date"] = pd.to_datetime(swings["game_date"])
+
+    return swings
+
+def split_by_date(swings: pd.DataFrame, cutoff: str = TRAIN_CUTOFF) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """ Return (train, test): games before the cutoff vs. on/after it. """
+    cutoff_ts = pd.Timestamp(cutoff)
+    train = swings[swings["game_date"] < cutoff_ts]
+    test = swings[swings["game_date"] >= cutoff_ts]
+    return train, test

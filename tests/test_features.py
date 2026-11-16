@@ -1,6 +1,12 @@
 import numpy as np
 import pandas as pd
-from pitchmodel.features import add_sequence_features, add_whiff_target
+from pitchmodel.features import (
+    add_sequence_features, 
+    add_whiff_target, 
+    get_swings, 
+    split_by_date
+)
+from pitchmodel.config import SWING_DESCRIPTIONS, TRAIN_CUTOFF
 
 def make_pitches() -> pd.DataFrame:
     """Two at-bats in one game, already sorted chronologically."""
@@ -58,3 +64,68 @@ def test_input_is_not_modified():
     cols_before = list(df.columns)
     add_sequence_features(add_whiff_target(df))
     assert list(df.columns) == cols_before
+
+
+def make_swing_data() -> pd.DataFrame:
+    """make_pitches() plus every column get_swings needs.
+
+    Two games on either side of the 2026-09-01 cutoff. Pitch 0 is a ball (not a swing).
+    Pitch 3 is a swing that is also the first pitch of its at-bat (prev_pitch_type is NaN).
+    """
+    df = make_pitches()
+    df["game_pk"] = [1, 1, 1, 2, 2]
+    df["game_date"] = ["2026-08-30"] * 3 + ["2026-09-02"] * 2
+    df["description"] = ["ball", "swinging_strike", "foul", "foul", "hit_into_play"]
+    df["release_spin_rate"] = 2300.0
+    df["pfx_x"] = 0.5
+    df["pfx_z"] = 1.2
+    df["balls"] = 0
+    df["strikes"] = [0, 1, 2, 0, 1]
+    df["stand"] = "R"
+    df["p_throws"] = "R"
+    return df
+
+
+def prepare(df: pd.DataFrame) -> pd.DataFrame:
+    return get_swings(add_sequence_features(add_whiff_target(df)))
+
+
+def test_get_swings_keeps_only_swings():
+    out = prepare(make_swing_data())
+    assert set(out["description"]) <= set(SWING_DESCRIPTIONS)
+    assert len(out) == 4   # the one "ball" is gone
+
+
+def test_get_swings_keeps_first_pitch_swings():
+    # A swing with no previous pitch must survive: dropping on sequence features
+    # would silently make Model A and Model B score on different rows.
+    out = prepare(make_swing_data())
+    assert out["prev_pitch_type"].isna().sum() == 1
+
+
+def test_get_swings_drops_rows_missing_a_baseline_feature():
+    df = make_swing_data()
+    df.loc[1, "release_spin_rate"] = np.nan
+    out = prepare(df)
+    assert len(out) == 3
+
+
+def test_get_swings_sets_categorical_dtypes():
+    out = prepare(make_swing_data())
+    for col in ["pitch_type", "stand", "p_throws", "prev_pitch_type"]:
+        assert isinstance(out[col].dtype, pd.CategoricalDtype), col
+
+
+def test_get_swings_parses_game_date():
+    out = prepare(make_swing_data())
+    assert pd.api.types.is_datetime64_any_dtype(out["game_date"])
+
+
+def test_split_by_date_separates_before_and_after_cutoff():
+    swings = prepare(make_swing_data())
+    train, test = split_by_date(swings)
+    cutoff = pd.Timestamp(TRAIN_CUTOFF)
+    assert (train["game_date"] < cutoff).all()
+    assert (test["game_date"] >= cutoff).all()
+    assert len(train) == 2 and len(test) == 2
+    assert len(train) + len(test) == len(swings)

@@ -16,6 +16,7 @@ SWING_DESCRIPTIONS = ["swinging_strike", "swinging_strike_blocked", "missed_bunt
 
 FEATURES = ["pitch_type", "release_speed", "release_spin_rate", "pfx_x", "pfx_z",
             "plate_x", "plate_z", "balls", "strikes", "stand", "p_throws"]   # Model A (the one we ship)
+
 CATEGORICAL_FEATURES = ["pitch_type", "stand", "p_throws"]
 
 SEQUENCE_FEATURES = ["prev_pitch_type", "prev_speed", "speed_change", "same_type_as_prev",
