@@ -1,0 +1,12 @@
+.git
+.venv
+data
+notebooks
+tests
+scripts
+.pytest_cache
+.pytest_tmp
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/.ipynb_checkpoints
