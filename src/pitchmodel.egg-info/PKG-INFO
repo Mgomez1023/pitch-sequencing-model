@@ -6,3 +6,9 @@ Requires-Dist: pandas
 Requires-Dist: numpy
 Requires-Dist: scikit-learn
 Requires-Dist: pyarrow
+Requires-Dist: joblib
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: httpx; extra == "dev"

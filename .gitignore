@@ -5,3 +5,4 @@ __pycache__/
 main copy.ipynb
 .pytest_tmp/
 .pytest_cache/
+*.egg-info/

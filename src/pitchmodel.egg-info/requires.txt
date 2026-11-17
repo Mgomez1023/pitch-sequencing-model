@@ -2,3 +2,10 @@ pandas
 numpy
 scikit-learn
 pyarrow
+joblib
+fastapi
+uvicorn
+
+[dev]
+pytest
+httpx
