@@ -1,3 +1,5 @@
+![CI](https://github.com/Mgomez1023/pitch-sequencing-model/actions/workflows/ci.yml/badge.svg)
+
 # Pitch Sequencing: Does the Previous Pitch Predict a Whiff?
 
 A pitch-level machine learning project on MLB Statcast data. It asks whether knowing what pitch came *before* helps predict a swing-and-miss, beyond what the current pitch already tells you (speed, movement, location, count).
