@@ -132,3 +132,6 @@ If everything is working, you should see numbers close to the results table abov
 - One month of data. Small effects need much more.
 - The models have no pitcher or batter identity, so pitcher quality can masquerade as other effects.
 - The whiff target counts `foul_tip` as a whiff to match Baseball Savant. Other definitions would change the rates slightly.
+
+## Live Deployment Link
+- https://pi-89115d164a1b4fe8b70a8eeaa6584917.ecs.us-east-1.on.aws/predict
