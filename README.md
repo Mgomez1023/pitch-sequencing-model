@@ -1,133 +1,189 @@
 # Pitch Sequencing: Does the Previous Pitch Predict a Whiff?
 
-A pitch-level machine learning project on MLB Statcast data. It asks whether knowing what pitch came *before* helps predict a swing-and-miss, beyond what the current pitch already tells you (speed, movement, location, count).
+![CI](https://github.com/Mgomez1023/pitch-sequencing-model/actions/workflows/ci.yml/badge.svg)
 
-## The question
+A pitch-level machine learning project on MLB Statcast data, taken from research question to a tested, containerized API deployed on AWS.
 
-> How much does pitch sequencing add to predicting a whiff, beyond the characteristics of the current pitch itself?
+**The question:** how much does knowing the *previous* pitch add to predicting a swing-and-miss, beyond what the current pitch already tells you (speed, movement, location, count)?
 
-The intuition is that a hitter who just saw a fastball should be more vulnerable to an offspeed pitch. This project tests that, rather than assuming it.
+**The answer (short version):** very little. A model that sees only the current pitch reaches ROC AUC 0.768 on a held-out final month, and adding sequence features did not beat it under a decision rule I fixed in advance. The shipped model is the simpler one.
 
-## Data
+**Live demo:** https://pi-89115d164a1b4fe8b70a8eeaa6584917.ecs.us-east-1.on.aws/docs
+(Interactive API docs. This runs on my AWS account and may be offline when you read this; screenshots are below and everything runs locally with one Docker command.)
 
-- **Source:** MLB Statcast pitch-by-pitch data, pulled with [`pybaseball`](https://github.com/jldbc/pybaseball).
-- **Window:** June 1–30, 2026 regular season (about 116k pitches, 119 columns).
-- **Unit of analysis:** each *swing* (55,399 after dropping rows with missing pitch measurements).
-- **Target (`whiff`):** 1 if the swing was a miss, 0 otherwise. Following Baseball Savant's convention, whiffs are `swinging_strike`, `swinging_strike_blocked`, `missed_bunt` and `foul_tip`. Swings also include fouls, balls in play and foul bunts. About 25% of swings are whiffs.
+![API docs](docs/api-docs.png)
+![Prediction response](docs/api-predict.png)
 
-## Method
+## Contents
 
-1. **Sort** pitches chronologically (`game_pk`, `at_bat_number`, `pitch_number`).
-2. **Build sequence features** on the full, sorted data (before filtering to swings) with `groupby(...).shift(1)` within each plate appearance: previous pitch type, previous speed, speed change, same-type-as-previous, vertical and horizontal location change, and whether the previous pitch was a whiff.
-3. **Filter to swings** and drop rows missing any of the baseline features.
-4. **Split by date, not randomly.** Pitches within the same game and pitcher are highly correlated, so a random split leaks information. Train: June 1–23 (41,626 swings). Test: June 24–30 (13,773 swings).
-5. **Fit two models with identical settings** (`HistGradientBoostingClassifier`, `categorical_features="from_dtype"`, `random_state=42`) and compare them on the same test swings:
-   - **Model A:** current-pitch features only (pitch type, velocity, spin rate, movement, plate location, balls, strikes, batter and pitcher handedness).
-   - **Model B:** Model A plus the sequence features.
-6. **Evaluate** with ROC AUC and log loss against a constant-probability baseline.
+- [Results](#results)
+- [How the model was chosen](#how-the-model-was-chosen)
+- [Architecture](#architecture)
+- [Run it locally](#run-it-locally)
+- [API](#api)
+- [Testing and CI](#testing-and-ci)
+- [Deployment on AWS](#deployment-on-aws)
+- [Design decisions](#design-decisions)
+- [Project structure](#project-structure)
+- [Limitations](#limitations)
+- [Roadmap](#roadmap)
 
-## Results so far
+## Results
+
+Data: the 2026 MLB regular season from Statcast. Unit of analysis is the **swing**. The target `whiff` is 1 if the swing missed (`swinging_strike`, `swinging_strike_blocked`, `missed_bunt`, `foul_tip`, matching Baseball Savant's convention). Train on pitches before 2026-09-01, test on everything from 2026-09-01 on.
 
 | Model | ROC AUC | Log loss |
 |---|---|---|
-| Baseline (always predict the training whiff rate) | 0.500 | 0.565 |
-| Model A (current pitch only) | 0.768 | 0.466 |
-| Model B (plus sequence features) | 0.766 | 0.467 |
+| Baseline (always predict the training whiff rate) | 0.500 | 0.5637 |
+| **Model A** (current pitch only, 11 features), **shipped** | **0.7678** | **0.4645** |
+| Model B (Model A plus 7 sequence features) | 0.769 | 0.464 |
 
-- Pitch characteristics carry real signal: Model A beats the baseline by a wide margin.
-- The sequence features added nothing measurable in aggregate. The differences between A and B (about 0.002) are within what a different test week could produce.
-- **Preliminary, still being investigated:** offspeed pitches thrown after a non-fastball whiff *more* (33.5%) than offspeed pitches thrown after a fastball (28.6%). The gap points the same direction for all six offspeed pitch types and is not explained by count. Model A explains part of it, but not all. It may reflect pitcher quality (pitchers with strong offspeed pitches throw them back to back) rather than a sequencing effect, which has not been ruled out yet.
+- Pitch characteristics carry real signal: Model A cuts log loss from 0.564 to 0.465 versus the constant baseline.
+- Sequence features (previous pitch type, speed change, location change, previous whiff, and so on) did not improve the model enough to justify shipping. Bootstrap interval for the log-loss difference (B minus A): -0.0007.
+- Sequence features gave a tiny aggregate gain (about 0.0007 log loss, 0.001 AUC), small compared with how much the model gains from the current-pitch features alone.
+- Under the pre-registered rule, that was not enough to ship: Model B did not beat A on every seed, so Model A ships.
+
+## How the model was chosen
+
+To avoid picking whichever model happened to look better, I wrote the decision rule **before** running the final comparison:
+
+> Ship Model B only if it beats Model A on **every** random seed **and** the bootstrap range of the log-loss difference lies **entirely below zero**.
+
+Model B did not clear that bar, so Model A ships. That is the finding, and it comes out of a rule I could not bend after seeing the numbers.
+
+Both models use identical settings (`HistGradientBoostingClassifier`, `categorical_features="from_dtype"`, `random_state=42`), so the only difference is the feature set.
+
+## Architecture
+
+```
+Statcast parquet files
+        |
+        v
+  src/pitchmodel/  (data -> features -> train -> predict)
+        |
+        v
+  models/whiff_model_a.joblib  +  models/metrics.json
+        |
+        v
+  FastAPI app (/health, /predict)  -- Pydantic validation
+        |
+        v
+  Docker image (python:3.13-slim, non-root user)
+        |
+        +--> GitHub Actions: tests, then build image and smoke-test /health
+        |
+        +--> Amazon ECR --> Amazon ECS (Express Mode, Fargate) --> HTTPS endpoint
+```
+
+## Run it locally
+
+### Option 1: Docker (fastest)
+
+```bash
+docker build -t pitchmodel .
+docker run --rm -p 8000:8000 pitchmodel
+```
+
+Open http://localhost:8000/docs.
+
+### Option 2: Python environment (Windows PowerShell shown)
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+pytest -q
+uvicorn pitchmodel.api:app --reload
+```
+
+Requires Python 3.10 or newer.
+
+### Retrain from raw data
+
+Put Statcast parquet files named `statcast_*.parquet` in `data/` (pulled with [`pybaseball`](https://github.com/jldbc/pybaseball); see `scripts/`), then:
+
+```powershell
+python -m pitchmodel.train
+```
+
+This rebuilds the features, fits Model A, evaluates on the held-out period, and writes `models/whiff_model_a.joblib` and `models/metrics.json`.
+
+## API
+
+`GET /health` returns `{"status": "ok"}`.
+
+`POST /predict` takes one pitch and returns the probability that a swing at it misses.
+
+```bash
+curl -X POST "http://localhost:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{"pitch_type":"SL","release_speed":85.0,"release_spin_rate":2500.0,"pfx_x":0.4,"pfx_z":0.1,"plate_x":0.3,"plate_z":1.8,"balls":1,"strikes":2,"stand":"R","p_throws":"R"}'
+```
+
+```json
+{"whiff_probability": 0.1337}
+```
+
+Inputs are validated with Pydantic: pitch type must be a known code, counts must be legal (balls 0 to 3, strikes 0 to 2), handedness must be `L` or `R`, and physical quantities are range-checked. Invalid input returns a `422` with the reason instead of reaching the model.
+
+## Testing and CI
+
+34 tests cover feature engineering, training, prediction, schema validation, and the API.
+
+```bash
+pytest -q
+```
+
+GitHub Actions runs on every push with two jobs:
+
+1. **test**: installs the package and runs the full test suite.
+2. **docker**: builds the image, starts the container, and waits for `/health` to return OK. This catches problems that unit tests cannot, such as a missing model file in the image.
+
+## Deployment on AWS
+
+The image is pushed to **Amazon ECR** and run on **Amazon ECS in Express Mode**, which provisions a Fargate service, an Application Load Balancer, and an HTTPS endpoint. The container listens on port 8000 and the load balancer health-checks `/health`.
+
+I deployed with the CLI and console rather than infrastructure-as-code. Codifying it (Terraform or CDK) and having CI push images to ECR automatically are on the roadmap.
+
+## Design decisions
+
+- **Time-based split, not random.** Pitches in the same game and by the same pitcher are highly correlated, so a random split leaks information and inflates scores.
+- **Sequence features built before filtering to swings.** Lags are computed with `groupby(["game_pk", "at_bat_number"]).shift(1)` on the full pitch sequence. Filtering to swings first would make "previous pitch" mean "previous swing" and silently corrupt the feature.
+- **Decision rule fixed in advance** (see above), so the model choice can't drift with the results.
+- **Saved model is tied to its scikit-learn version.** Dependencies are pinned so the image loads the artifact it was trained with.
+- **Container hygiene.** Slim base image, non-root user, `.dockerignore` keeps data and notebooks out of the image, binds to `0.0.0.0` so the port is reachable.
+- **Model loaded once at startup** via the FastAPI lifespan hook, not on every request.
 
 ## Project structure
 
 ```
-pitch-sequencing/
-├── data.py                  # pulls Statcast data and saves it as parquet
-├── data/
-│   └── statcast_june.parquet   # created by data.py (not committed)
-├── <your-notebook>.ipynb    # exploration, features, models, evaluation
-└── README.md
+pitch-sequencing-model/
+├── src/pitchmodel/
+│   ├── config.py        # paths, feature lists, constants
+│   ├── data.py          # load and filter Statcast parquet files
+│   ├── features.py      # target, sequence features, swing filter, date split
+│   ├── train.py         # fit, evaluate, save/load model; python -m pitchmodel.train
+│   ├── predict.py       # single-pitch prediction
+│   ├── schemas.py       # Pydantic request/response models
+│   └── api.py           # FastAPI app
+├── tests/               # pytest suite (34 tests)
+├── models/              # trained model + metrics.json
+├── notebooks/           # exploration and the original analysis
+├── .github/workflows/   # CI
+├── Dockerfile
+└── pyproject.toml
 ```
-
-## Getting started (Windows)
-
-These steps use PowerShell.
-
-### Prerequisites
-
-- **Python 3.10 or newer** from [python.org](https://www.python.org/downloads/). During install, check **"Add python.exe to PATH"**.
-- **Git** (optional, only needed to clone the repo).
-
-### 1. Get the code
-
-```powershell
-git clone <repo-url>
-cd pitch-sequencing
-```
-
-### 2. Create a virtual environment
-
-```powershell
-python -m venv .venv
-```
-
-### 3. Activate it
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-You should see `(.venv)` at the start of your prompt. If PowerShell says running scripts is disabled, run this once and try again:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
-
-(In Command Prompt instead of PowerShell, use `.venv\Scripts\activate.bat`.)
-
-### 4. Install dependencies
-
-```powershell
-pip install pybaseball pandas numpy scikit-learn jupyter pyarrow
-```
-
-### 5. Download the data
-
-```powershell
-mkdir data
-python data.py
-```
-
-This pulls June 2026 Statcast data and saves it to `data\statcast_june.parquet`. It can take several minutes the first time. `pybaseball`'s cache is enabled, so repeat runs are faster.
-
-### 6. Run the notebook
-
-```powershell
-jupyter notebook
-```
-
-Your browser opens the Jupyter file list. Open the project notebook and choose **Kernel → Restart Kernel and Run All Cells**. Run it from the project root so the relative path `data/statcast_june.parquet` resolves.
-
-If everything is working, you should see numbers close to the results table above. They can shift slightly if Statcast revises historical data.
-
-## Troubleshooting
-
-- **`ImportError: DLL load failed ... An Application Control policy has blocked this file`:** Windows is blocking one of pyarrow's files (often Smart App Control). First try `pip install --force-reinstall pyarrow`. To test outside the notebook: `python -c "import pyarrow; print(pyarrow.__version__)"`. If it still fails, check Smart App Control in Windows Security, and reboot after changing it.
-- **`SystemError: ... Could not get source` after a failed import:** the notebook kernel is in a half-loaded state. Use **Kernel → Restart Kernel** (not just re-running the cell).
-- **`FileNotFoundError: data/statcast_june.parquet`:** run `python data.py` first, and launch Jupyter from the project root.
-- **`jupyter` is not recognized:** the virtual environment isn't active. Repeat step 3, then confirm step 4 finished.
-- **Only the last line of a cell shows output:** that is normal in Jupyter. Wrap earlier lines in `print(...)` or put the one you want to see last.
-
-## Roadmap
-
-- Compare Model A and Model B on offspeed swings only, where the effect would live, plus a bootstrap confidence interval for the log loss difference.
-- Check whether the raw "after a fastball" gap survives a within-pitcher comparison.
-- Measure **tunneling** directly: compute where consecutive pitches are at the batter's decision point from Statcast release position, velocity and acceleration, and test whether a smaller "tunnel gap" goes with more whiffs.
-- Pull the full season for enough data to detect small effects.
-- Wrap the model in an API (FastAPI), containerize it with Docker, add CI, and deploy to AWS.
 
 ## Limitations
 
-- One month of data. Small effects need much more.
-- The models have no pitcher or batter identity, so pitcher quality can masquerade as other effects.
-- The whiff target counts `foul_tip` as a whiff to match Baseball Savant. Other definitions would change the rates slightly.
+- **One season of data.** Small effects need more, and this is why a real sequencing effect could still hide below the noise.
+- **No pitcher or batter identity** in the model, so pitcher quality can masquerade as other effects.
+- **The whiff target counts `foul_tip` as a whiff** to match Baseball Savant. Other definitions would shift the rates slightly.
+- **The deployed endpoint is a demo.** It has no authentication or rate limiting.
+
+## Roadmap
+
+- **Tunneling (v2):** compute where consecutive pitches are at the batter's decision point from Statcast release position, velocity, and acceleration, and test whether a smaller "tunnel gap" goes with more whiffs.
+- A within-pitcher comparison to test whether the offspeed-after-fastball gap survives controlling for who is pitching.
+- Cluster bootstrap (resampling by game or pitcher) and per-month replication.
+- Infrastructure-as-code for the AWS deployment, and CI that pushes to ECR automatically.
